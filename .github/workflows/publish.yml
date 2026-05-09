@@ -1,0 +1,66 @@
+name: Publish
+
+# Triggers on a version tag like v0.1.0 / v1.2.3
+# Tag from a commit on main:
+#   npm version patch    # or minor / major — bumps package.json + creates the tag
+#   git push --follow-tags
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  # Allow manual runs too, in case a publish needs to be re-driven
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Needed to attach the .vsix to a GitHub release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Type-check + bundle. Refuses to publish if either fails.
+      - run: npm run build
+
+      # Sanity check: tag must match package.json version exactly
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+          echo "Publishing version $PKG_VERSION"
+
+      # Build the .vsix (kept as workflow artifact even if publish fails)
+      - run: npx --no-install vsce package
+
+      - name: Upload .vsix as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ship-safe-${{ github.ref_name }}.vsix
+          path: '*.vsix'
+          if-no-files-found: error
+
+      # Publish to the VS Code Marketplace.
+      # Requires repo secret VSCE_PAT — see README.md / DEPLOY.md.
+      - name: Publish to Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx --no-install vsce publish --packagePath *.vsix
+
+      # Attach the .vsix to a GitHub release for sideload installs
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.vsix'
+          generate_release_notes: true
+          fail_on_unmatched_files: true
